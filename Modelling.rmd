@@ -1,0 +1,93 @@
+---
+title: "Executive Summary"
+subtitle: "Ozone Data Analysis"
+author: "Maggie Schweihs"
+date: "Spring 2018 Midterm"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Downloads")
+library(randomForest)
+ozone = read.csv("ozone.csv")
+ozone = ozone[which(complete.cases(ozone)),] #remove incomplete rows
+ozone = ozone[,-2] #remove the categorical response variable
+# Convert weekday from factor to numeric
+ozone$weekday = as.character(ozone$weekday)
+ozone$weekday[which(ozone$weekday == "Sunday")] = 1
+ozone$weekday[which(ozone$weekday == "Monday")] = 2
+ozone$weekday[which(ozone$weekday == "Tueday")] = 3
+ozone$weekday[which(ozone$weekday == "Wednesday")] = 4
+ozone$weekday[which(ozone$weekday == "Thursday")] = 5
+ozone$weekday[which(ozone$weekday == "Friday")] = 6
+ozone$weekday[which(ozone$weekday == "Saturday")] = 7
+ozone$weekday = as.numeric(ozone$weekday)
+```
+
+## Introduction
+
+The analysis presented in this paper utilizes the Ozone data set discussed in Breiman and Friedman (JASA, 1985, p.580). The data are for 330 days in 1976. All measurements are in the area of Upland, CA, east of Los Angeles. The dataset allows us to study the relationship between atmospheric ozone and meteorological data variables. 
+
+I have chosen to analyze the quantitative response variable. The primary reason for this was due to the way the factor variable has been defined. Ozone concentration greater than 10 ppm is coded "1", interpreted as high; and values less than 10 ppm are coded "0", or low. According to the CDC, 10 ppm is considered a value "Immediately Dangerous to Life and Health (IDLH)". The Occupational Safety and Health Administration (OSHA) defines an IDLH as: "An atmospheric concentration of any toxic, corrosive or asphyxiant substance that poses an immediate threat to life or would cause irreversible or delayed adverse health effects or would interfere with an individual's ability to escape from a dangerous atmosphere" (National Research Council, 1998). I did not feel that those thresholds would be useful outside of detecting an imminent threat.
+
+There is a much lower threshold set forth by OSHA which is considered the Emergency Exposure Guidance Level (EEGL) and is set at 1 ppm for 1-hour of emergency exposure and 0.1 ppm for 24-hours of emergency exposure. The EEGLs are "concentrations of substances in the air that may be judged by the U.S. Department of Defense to be acceptable for the performance of specific tasks during rare, emergency conditions, lasting 1 to 24 hr...The EEGL may, however, cause transient adverse effects...An EEGL is acceptable only during an emergency," (National Research Council, 1998). The Recommended Exposure Limit (REL) is also 0.1 ppm, which is a level at which "nearly all workers can be exposed repeatedly, day after day...without adverse effects," (National Research Council, 1998). In order to examine levels of ozone beneath the IDLH threshold, yet above the REL that would still raise concern to the general public, I used the quantitative response.
+
+A possible practical purpose for this data analysis would be to develop an app that uses the daily meteorologic data to predict ozone concentration in an area. The app would provide an accurate ozone alert forecasting system to alert the public prior to levels becoming dangerous. This could be achieved through a color coded map with ozone concentration values ranging from 0 to 0.1 ppm as green, 0.1 to 9.9 ppm as shades of yellow to dark orange, and 10 ppm as red. Utilizing the Center for Disease Control NIOSH information, the app could use the specific quantitative response to provide a current and accurate risk assessment regarding ozone exposure. For example, an exposure of 6.5 ppm for 3 hours is lethal to rabbits (National Institute for Occupational Safety and Health, 2014). Similar information is available for other sizes of animals.
+
+## Summary of Analysis
+
+Initial exploration of the ozone dataset revealed that the quantitative response variable `hourAverageMax` is right-skewed, along with `visibility` and `pressure500Height` predictor variables. We can also observe colinearity among several pairs of variables such as `tempSandburg` and `inversionBaseTemp`. This is expected due to the nature of the data, as it was collected on a daily basis and weather patterns often persist over time.
+
+Due to these observations, two regression methods were employed to determine a best model for predicting the response: penalized regression and decision trees. Penalized regression provides an alternative method to classical subset selection in dealing with colinearity. Decision Trees also incorporate variable selection and are resistant to skewness. Using random forests will enable us to reduce the correlations in the predictions that stem from having correlated variables, by choosing from among a subset of variables at each node. This is likely to reduce the variance in our estimates.
+
+Ten-fold cross-validation was used to evaluate the models produced by the two methods. While evaluating penalized regression, the following parameters were determined to be optimal:
+
+Tuning Parameter | Best Value
+-----------------|------------
+$\alpha$         |  0.6
+$\lambda$        | 0.062662
+
+Ten-fold cross-validation was also used to tune parameters of boosted and bagged random forest decision trees. The parameters of `shrinkage` and `interaction.depth` were evaluated in the boosted models. The `mtry`, or number of predictors, was tuned in the random forest model.
+
+Tuning Parameter | Best Value
+-----------------|------------
+shrinkage         |  0.001
+interaction depth        | 4
+predictors        | 2
+
+Using Double CV with model selection and model assessment, the following models were evaluated:
+
+1. Penalized Regression via `glmnet` function with alpha = .06 and lambda = 0.062662
+2. Boosted Decision Trees via `gbm` function with shrinkage = .001 and interaction depth = 4
+3. Random Forest via `randomForests` function with number of predictors = 2
+
+Model 3, the Random Forest model was chosen via the double CV methodwith the following results. 
+
+**Random Forest Model (Model 3) Double CV Assessment:**
+
+Statistic | Value
+-----------------|------------
+CV         |  15.76196
+R-squared        | 0.7536657
+
+The chosen model was shown to account for approximately 75% of the variation in the test data, which is a reasonable amount.
+
+## Final Model and Results
+
+```{r}
+Model3.final = randomForest(hourAverageMax~., data = ozone, mtry = 2, importance = T)
+varImpPlot(Model3.final, main = "Variable Importance measured by Model 3 (Random Forest)")
+```
+
+From the variable importance plot, we can observe that temperature is the most important factor to consider when accounting for concentration of ozone in the area of Upland, CA. This is followed closely by pressure and humidity. Intuitively, these importance factors are logical due to the fact that the behavior of gas (ozone) under pressure is to condense. Likewise, humidity in the air makes the air denser and thus more difficult for ozone to dissipate.
+
+My final recommendation to app makers using this algorithm would be to clearly state the accuracy to users. An estimated accuracy of 75% is decent for a forecasting app, however, there is the potential for real health danger if ozone levels reach above 0.1 ppm. In order to avoid any mass panic or false sense of security, the app should have a disclaimer and links to more up-to-date information, assuming the algorithm is not updated in real-time. Furthermore, additional data should be compiled in order to form a more accurate prediction of the response variable. This would allow app makers to provide an accurate ozone alert forecasting system to alert the public prior to levels becoming dangerous and with a high degree of accuracy. 
+
+## References
+
+National Institute for Occupational Safety and Health. (2014, December 4). *Immediately Dangerous To Life or Health (IDLH) Values*. Retrieved March 16, 2018, from Centers for Disease Control and Prevention: https://www.cdc.gov/niosh/idlh/10028156.html
+
+National Research Council (US) Subcommittee on Rocket-Emission Toxicants. Assessment of Exposure-Response Functions for Rocket-Emission Toxicants. Washington (DC): National Academies Press (US); 1998. Appendix B, DEFINITIONS OF CURRENT EXPOSURE GUIDANCE LEVELS: https://www.ncbi.nlm.nih.gov/books/NBK230436/
+
+Earthstar Geographics, "1997 Ozone Standards". U.S. EPA Office of Air and Radiation (OAR) Office of Air Quality Planning and Standards (OAQPS): https://epa.maps.arcgis.com/apps/StorytellingSwipe/index.html?appid=45aea0ec00d44a31826fc3ed51995908#

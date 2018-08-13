@@ -1,0 +1,352 @@
+---
+title: "Midterm_Code_Schweihs"
+author: "Maggie Schweihs"
+date: "3/20/2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(gbm)
+library(randomForest)
+```
+
+## Preparing the Data
+
+The first step in the analysis was to remove incomplete rows and convert the weekday variable from a factor to a numeric variable
+
+```{r Data Prep, echo=TRUE, message=FALSE, warning=FALSE}
+setwd("~/Downloads")
+ozone = read.csv("ozone.csv")
+ozone = ozone[which(complete.cases(ozone)),] #remove incomplete rows
+ozone = ozone[,-2] #remove the categorical response variable
+# Convert weekday from factor to numeric
+ozone$weekday = as.character(ozone$weekday)
+ozone$weekday[which(ozone$weekday == "Sunday")] = 1
+ozone$weekday[which(ozone$weekday == "Monday")] = 2
+ozone$weekday[which(ozone$weekday == "Tueday")] = 3
+ozone$weekday[which(ozone$weekday == "Wednesday")] = 4
+ozone$weekday[which(ozone$weekday == "Thursday")] = 5
+ozone$weekday[which(ozone$weekday == "Friday")] = 6
+ozone$weekday[which(ozone$weekday == "Saturday")] = 7
+ozone$weekday = as.numeric(ozone$weekday)
+```
+
+## Initial Data Exploration
+
+Here we see several skewed variables
+
+```{r Histograms, echo=TRUE, message=FALSE, warning=FALSE}
+par(oma=c(0,2,1,0))
+par(mfrow=c(1,3),
+    mai = c(1, 0.1, 0.5, 0.1))
+hist(ozone$hourAverageMax, xlab = "hourAverageMax", main = "", axes = TRUE) #Histogram appears right-skewed
+#Other variables appear skewed
+hist(ozone$visibility, xlab = "visibility", main = "", axes = TRUE)
+hist(ozone$pressure500Height, xlab = "pressure500Height", main = "", axes = TRUE)
+title(main = "Histograms of Skewed Variables", outer = T)
+```
+
+Due to the nature of the data, we expect colinearity:
+
+```{r Colinearity}
+z = cor(ozone)
+z[lower.tri(z,diag=TRUE)]=NA  #Prepare to drop duplicates and meaningless information
+z[abs(z)<0.5]=NA #Get rid of pairs with correlation -0.5 to 0.5
+z=as.data.frame(as.table(z))  #Turn into a 3-column table
+names(z)[3] = "Cor Coef"
+z=na.omit(z)  #Get rid of the junk we flagged above
+z=z[order(-abs(z$"Cor Coef")),] 
+z
+#REFERENCE: https://stackoverflow.com/questions/7074246/show-correlations-as-an-ordered-list-not-as-a-large-matrix
+```
+
+We can also observe colinearity and skewness by looking at a general linear model of the data. Notice the colinearity in the Residuals vs Fitted plot and skewness in the Residuals vs Leverage plot.
+
+```{r GLM}
+par(mfrow = c(2,2))
+plot(lm(hourAverageMax~., data = ozone))
+```
+
+# Data Mining Methods
+
+## Penalized Regression: 
+
+```{r Penalized Regression}
+x = model.matrix(hourAverageMax~.,data=ozone)[,-1]
+y = ozone[,1]
+library(glmnet)
+ncv = 10 #10-fold cross-validation
+
+#we will be choosing both the best lambda and the best alpha
+lambdalist = exp((-1000:500)/100)
+alphalist = c(0,.1,.2,.4,.6,.8,.9,1)
+set.seed(8)
+
+x.in = x
+y.in = y
+n.in = dim(x.in)[1]
+if ((n.in%%ncv) == 0) {
+  groups.in= rep(1:ncv,floor(n.in/ncv)) }else{
+    #account for different-sized input matrices
+    groups.in=c(rep(1:ncv,floor(n.in/ncv)),(1:(n.in%%ncv)))
+  }
+cvgroups.in = sample(groups.in,n.in)
+
+# Create storage variables for lambda and cv values
+alllambdabest = rep(NA,8)
+allcv10best = rep(NA,8)
+
+#Perform 10-fold CV for each of the 8 lambda values using cv.glmnet
+for (m in 1:8) {
+  cvfit.in = cv.glmnet(x.in, y.in, lambda=lambdalist, 
+                       alpha=alphalist[m], nfolds=ncv, foldid=cvgroups.in)
+  allcv10best[m] = cvfit.in$cvm[order(cvfit.in$cvm)[1]]
+  alllambdabest[m] = cvfit.in$lambda[order(cvfit.in$cvm)[1]]
+}
+whichmodel = order(allcv10best)[1]
+bestalpha = alphalist[whichmodel]
+bestlambda = alllambdabest[whichmodel]
+bestmodel = glmnet(x.in, y.in, alpha = bestalpha,lambda=lambdalist)
+par(oma=c(1,2,1,1))
+par(mfrow = c(1,2), mai = c(1, .3, .5, 0.1))
+plot(bestmodel,xvar="lambda"); abline(v=log(bestlambda))
+plot(bestmodel)
+title(main = "Best Penalized Regression Model", outer = T)
+whichlowestcv = min(allcv10best)
+```
+
+```{r}
+penRegInt = coef(bestmodel, s=bestlambda)[1,1]
+penRegCoef = coef(bestmodel, s=bestlambda)[-1,1]
+plot(x%*%penRegCoef + penRegInt, y, xlab = "yhat", main = "Penalized Regression Predicted vs Actual"); abline(0,1)
+```
+
+The best model had $\alpha$ = `bestalpha` and $\lambda$ = `bestlambda`. The lowest CV found for the penalized regression models was `whichlowestcv`. 
+
+## DECISION TREES:
+
+# COMPARE BAGGING TO BOOSTING
+
+Using 10-fold CV, compare the error rate of bagged to boosted decision trees.
+
+```{r RandomForests1}
+set.seed(8)
+n=dim(x.in)[1]
+k =10
+bag.predict = rep(-1, n)
+boost.predict = rep(-1, n)
+for(i in 1:k){
+  groupi = (cvgroups.in == i)
+  boost = gbm(hourAverageMax~., data = ozone[!groupi,], distribution = "gaussian", 
+              n.trees = 5000, shrinkage = .001, interaction.depth = 3)
+  boost.predict[groupi] = predict(boost, newdata = ozone[groupi,],
+                                  n.trees = 5000, type = "response")
+  ozone.bag = randomForest(hourAverageMax~., data = ozone[!groupi,], mtry = 9,
+                             importance = T)
+  bag.predict[groupi] = predict(ozone.bag, newdata = ozone[groupi,], mtry = 9,
+                                type = "response")
+}
+bagmodelCV = sum((bag.predict-ozone$hourAverageMax)^2)/n
+boostmodelCV = sum((boost.predict-ozone$hourAverageMax)^2)/n
+```
+
+*Ensemble Method* | *CV*
+
+-----------------|------------
+Bagged         |  `bagmodelCV`
+Boosted     | `boostmodelCV`
+
+Using 10-fold CV, the shrinkage parameter of the boosted model is tuned. 
+
+```{r Boosted Shrinkage Tuning}
+boost.predict = rep(-1, n)
+# Create storage variables for cv values
+BOOSTmodelCV = rep(NA,5)
+shrinkageValues = c(.001,.005,.01,.05,.1)
+for( s in 1:5){
+  for(i in 1:k){
+    groupi = (cvgroups.in == i)
+    boost = gbm(hourAverageMax~., data = ozone[!groupi,], distribution = "gaussian", n.trees = 5000, shrinkage = shrinkageValues[s], interaction.depth = 3)
+  boost.predict[groupi] = predict(boost, newdata = ozone[groupi,],
+                                  n.trees = 5000, type = "response")
+  }
+  BOOSTmodelCV[s] = sum((boost.predict-ozone$hourAverageMax)^2)/n
+}
+whichmodelshrink = order(BOOSTmodelCV)[1]
+```
+
+The best boosted model has a shrinkage value of `shrinkageValues[whichmodel]`. This value is the same as the original model.
+
+Using 10-fold CV, the interaction depth parameter of the boosted model is tuned. 
+
+```{r Boosted Interaction Depth Tuning}
+boost.predict = rep(-1, n)
+# Create storage variables for cv values
+BOOSTmodelCV = rep(NA,5)
+interactionValues = c(1:5)
+for( int in 1:5){
+  for(i in 1:k){
+    groupi = (cvgroups.in == i)
+    boost = gbm(hourAverageMax~., data = ozone[!groupi,], distribution = "gaussian", n.trees = 5000, shrinkage = .001, interaction.depth = interactionValues[int])
+  boost.predict[groupi] = predict(boost, newdata = ozone[groupi,],
+                                  n.trees = 5000, type = "response")
+  }
+  BOOSTmodelCV[int] = sum((boost.predict-ozone$hourAverageMax)^2)/n
+}
+plot(ozone$hourAverageMax, boost.predict, ylab = "yhat", main = "Boosted Trees Predicted vs Actual");abline(0,1)
+whichmodelint = order(BOOSTmodelCV)[1]
+```
+
+The best boosted model has a shrinkage value of `interactionValues[whichmodel]`. 
+
+
+Using 10-fold CV, the number of predictors in a random forest model is tuned.
+
+```{r}
+rf.predict = rep(-1, n)
+# Create storage variables for lambda and cv values
+allPredictorsBest = rep(NA,9)
+RFmodelCV = rep(NA,9)
+predictors = c(1:9)
+for( m in 1:9){
+  for(i in 1:k){
+    groupi = (cvgroups.in == i)
+    ozone.rf = randomForest(hourAverageMax~., data = ozone[!groupi,], mtry = predictors[m], importance = T)
+    rf.predict[groupi] = predict(ozone.rf, newdata = ozone[groupi,], mtry = predictors[m], type = "response")
+  }
+  RFmodelCV[m] = sum((rf.predict-ozone$hourAverageMax)^2)/n
+}
+  plot(ozone$hourAverageMax, rf.predict, ylab = "yhat ", main = "Penalized Regression Predicted vs Actual"); abline(0,1)
+whichmodelpred = order(RFmodelCV)[1]
+```
+
+## Double Cross-Validation
+
+Using Double CV with model selection and model assessment, evaluate the following models:
+
+1. Penalized Regression via `glmnet` function with alpha = `bestalpha` and lambda = `bestlambda`
++ Boosted Decision Trees via `gbm` function with shrinkage 2. `shrinkageValues[whichmodelshrink]` and interaction depth = `interactionValues[whichmodelint]`
+3. Random Forest via `randomForests` with number of predictors = `predictors[whichmodelpred]`
+
+```{r DoubleCross2}
+
+##### model assessment OUTER shell #####
+fulldata.out = ozone
+n.out = dim(fulldata.out)[1]
+k.out = 10
+#define the validation set
+set.seed(8)
+if ((n.out%%k.out) == 0) {
+  groups.out= rep(1:k.out,floor(n.out/k.out))} else {
+    groups.out=c(rep(1:k.out,floor(n.out/k.out)),(1:(n.out%%k.out)))
+  }
+cvgroups.out = sample(groups.out,n.out)  #orders randomly, with seed (8) 
+
+allpredictedCV.out = rep(NA,n.out)
+bestModel.out = rep(NA,k.out)
+for (j in 1:k.out)  { 
+  groupj.out = (cvgroups.out == j)
+  trainxy.out = ozone[!groupj.out,]
+  testxy.out = ozone[groupj.out,]
+##############################
+##entire model-fitting process##
+xy.in = trainxy.out
+n.in = dim(xy.in)[1]
+ncv = 10
+if ((n.in%%ncv) == 0) {
+  groups.in= rep(1:ncv,floor(n.in/ncv))} else {
+    groups.in=c(rep(1:ncv,floor(n.in/ncv)),(1:(n.in%%ncv)))
+  }
+
+cvgroups.in = sample(groups.in,n.in)
+# with model selection 
+allpredictedcv10 = matrix(rep(0,n.in*3),ncol=3)
+for (i in 1:ncv) {
+  newdata.in = xy.in[cvgroups.in==i,]
+# Penalized Regression
+  Model1 = glmnet(as.matrix(xy.in[cvgroups.in!=i, -1]), as.matrix(xy.in[cvgroups.in!=i, 1]), 
+                  alpha = bestalpha,
+                  lambda= lambdalist)
+  allpredictedcv10[cvgroups.in==i,1] = predict.glmnet(
+    Model1, newx = as.matrix(newdata.in[,-1]), s = bestlambda, type = "response")
+# Boosted Decision Trees
+  Model2 = gbm(hourAverageMax~., data = xy.in[cvgroups.in!=i,], 
+               distribution = "gaussian", 
+               n.trees = 5000, 
+               shrinkage = shrinkageValues[whichmodelshrink], #.001
+               interaction.depth = interactionValues[whichmodelint]) #4
+  allpredictedcv10[cvgroups.in==i,2] = predict(Model2, newdata = newdata.in,
+                                               n.trees = 5000, type = "response")
+# Random Forest
+  Model3 = randomForest(hourAverageMax~., data = xy.in[cvgroups.in!=i,], 
+                        mtry = predictors[whichmodelpred], 
+                        importance = T)
+   allpredictedcv10[cvgroups.in==i,3] = predict(Model3, newdata = newdata.in, 
+                        mtry = predictors[whichmodelpred], type = "response")
+}
+allpredictedcv10[,1:3] = allpredictedcv10[,1:3]-1
+allcv10 = rep(0,3)
+for (m in 1:3) 
+  allcv10[m] = sum((allpredictedcv10[,m]-xy.in$hourAverageMax)^2)/n.in
+bestmodel = order(allcv10)[1]
+bestModel.out[j] = bestmodel
+##############################
+if (bestmodel == 1)  {
+  # Penalized Regression
+  Model1.train = glmnet(as.matrix(trainxy.out[, -1]), 
+                        as.matrix(trainxy.out[, 1]), 
+                  alpha = bestalpha,
+                  lambda= lambdalist)
+  allpredictedCV.out[groupj.out] = predict.glmnet(Model1.train, 
+                  newx = as.matrix(testxy.out[,-1]), 
+                  s = bestlambda, type = "response")
+}
+if (bestmodel == 2)  {
+  # Boosted Decision Trees
+  Model2.train = gbm(hourAverageMax~., data = trainxy.out, 
+               distribution = "gaussian", 
+               n.trees = 5000, 
+               shrinkage = shrinkageValues[whichmodelshrink], #.001
+               interaction.depth = interactionValues[whichmodelint]) #4
+  allpredictedCV.out[groupj.out] = predict(Model2.train, newdata = testxy.out,
+                                               n.trees = 5000, type = "response")
+}
+if (bestmodel == 3)  {
+  # Random Forest
+  Model3.train = randomForest(hourAverageMax~., data = trainxy.out, 
+                        mtry = predictors[whichmodelpred], 
+                        importance = T)
+   allpredictedCV.out[groupj.out] = predict(Model3.train, newdata = testxy.out, 
+                        mtry = predictors[whichmodelpred], type = "response")
+}
+}
+
+#assessment
+y.out = fulldata.out$hourAverageMax
+CV.out = sum((allpredictedCV.out-y.out)^2)/n.out
+R2.out = 1-sum((allpredictedCV.out-y.out)^2)/sum((y.out-mean(y.out))^2)
+CV.out; R2.out
+```
+
+The Random Forest model was chosen 100% of the time. 
+
+```{r Best Model Choices for each outer CV}
+bestModel.out
+```
+
+```{r}
+par(mfrow = c(1,1))
+plot(y.out, allpredictedCV.out, ylab = "yhat", 
+     xlab = "hourAverageMax Ozone Concentration (ppm)",
+     xlim = c(0,30), main = "Fitted Response vs. Actual Response for Test Data"); abline(0,1)
+```
+
+Finally, train the model with all of the data and create a variable importance plot.
+
+```{r}
+Model3.final = randomForest(hourAverageMax~., data = ozone, 
+                        mtry = 2, 
+                        importance = T)
+varImpPlot(Model3.final)
+```
